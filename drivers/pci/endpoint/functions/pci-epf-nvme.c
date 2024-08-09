@@ -20,9 +20,9 @@
 #include <linux/nvme.h>
 #include <generated/utsrelease.h>
 
-#include "../../../nvme/host/nvme.h"
-#include "../../../nvme/host/fabrics.h"
-#include "../../../nvme/target/nvmet.h"
+#include "../drivers/nvme/host/nvme.h"
+#include "../drivers/nvme/host/fabrics.h"
+#include "../drivers/nvme/target/nvmet.h"
 
 /*
  * Maximum number of queue pairs. Each queue pair require 3 memory mapping:
