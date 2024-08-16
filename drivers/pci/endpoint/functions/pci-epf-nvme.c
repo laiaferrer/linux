@@ -3644,7 +3644,7 @@ static void __exit pci_epf_nvme_exit(void)
 	pr_info("ACTUAL SIZE %zu\n", actual_size);
 	//file where the actual size will be saved
 	kv_file = filp_open(DISK_ACTUAL_SIZE_PATH, O_RDWR | O_CREAT, 0666);
-	kernel_write(kv_file, &actual_size, sizeof(actual_size), 0);
+	int ret = kernel_write(kv_file, &actual_size, sizeof(actual_size), 0);
 	filp_close(kv_file, NULL);
 
 	pr_info("\t---- ACTUAL SIZE %zu ---- \n", actual_size);
