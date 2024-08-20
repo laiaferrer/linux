@@ -20,6 +20,7 @@
 #include <linux/nvme.h>
 #include <generated/utsrelease.h>
 
+
 #include "../drivers/nvme/host/nvme.h"
 #include "../drivers/nvme/host/fabrics.h"
 #include "../drivers/nvme/target/nvmet.h"
@@ -138,16 +139,118 @@ struct kv_readdir_data {
 	struct unicode_map	*um;
 };
 
+struct KVF {
+	u16	KV_key_max_length;
+	u8 	rsvd1;
+	union {
+		u8 additional_format_options;
+		struct 
+		{
+			u8 relative_performance : 2;
+			u8 rsvd : 6;
+		} __packed;
+	};
+	u32	KV_value_max_length;
+	u32	max_num_keys;
+	u32	rsvd2;
+} __packed;
+
+struct namespace_data_structure {
+	u64	NSZE;			//mandatory
+	u64	rsvd1;
+	u64	NUSE;		//mandatory
+
+	union {
+		u8 NSFEAT;		//mandatory
+		struct 
+		{
+			u8 resvd1 : 3;
+			u8 bit3 : 1;
+			u8 resvd2 : 4;
+		} __packed;
+	};
+	u8	NKVF;		//mandatory
+	union {
+		u8 NMIC;
+		struct 
+		{
+			u8 shared_namespace : 1;
+			u8 disparsed_namespace : 1;
+			u8 reserved : 6;
+		} __packed;
+	};
+	union {
+		u8 RESCAP;
+		struct 
+		{
+			u8 PTPLS : 1;
+			u8 WES : 1;
+			u8 EAS : 1;
+			u8 WEROS : 1;
+			u8 EAROS : 1;
+			u8 WEARS : 1;
+			u8 EAARS : 1;
+			u8 IEKS : 1;
+		} __packed;
+	};
+	union {
+		u8 FPI;
+		struct 
+		{
+			u8 RFNVM : 7;
+			u8 FPIS : 1;
+		} __packed;
+	};
+	u32	rsvd2 : 24;
+	u32	NOVG;
+	u32	ANAGRPID;
+	u32	rsvd3 : 24;
+	union {
+		u8 NSATTR;
+		struct 
+		{
+			u8 CWP : 1;
+			u8 rsvd : 7;
+		} __packed;
+	};
+	u16	NVMSETID;
+	u16	ENDGID;
+
+	u8	NGUID[16];
+	u8	EUI64[8];
+	//KV Formats List
+	struct KVF	KVF0;				//mandatory
+	struct KVF	KVF1;
+	struct KVF	KVF2;
+	struct KVF	KVF3;
+	struct KVF	KVF4;
+	struct KVF	KVF5;
+	struct KVF	KVF6;
+	struct KVF	KVF7;
+	struct KVF	KVF8;
+	struct KVF	KVF9;
+	struct KVF	KVF10;
+	struct KVF	KVF11;
+	struct KVF	KVF12;
+	struct KVF	KVF13;
+	struct KVF	KVF14;
+	struct KVF	KVF15;
+	u64	rsvd4[439];
+	u64	vendor_specific[32];
+}__packed;
+
 /* 4 is for '/kv/', 16 is for the key and + 1 for the trailing 0 */
 #define KV_BASE_PATH "/kv/"
 #define KV_BASE_PATH_LEN 4
 #define NVME_KV_MAX_KEY_LEN 16
 #define NVME_KV_MAX_PRINTABLE_KEY_LEN (NVME_KV_MAX_KEY_LEN*2)
 #define KV_PATH_LEN (KV_BASE_PATH_LEN+NVME_KV_MAX_PRINTABLE_KEY_LEN+1)
-#define MAX_NUM_VALUE_SIZE 2147483647
+#define MAX_NUM_VALUE_SIZE (4294967295U)
 #define DISK_SPACE 1024
+#define NVME_KV_KEY_VALUE_CONFIG 0x20
 
 size_t actual_size;
+int ednek;
 
 #define NVME_KV_STORE_REPLACE_FLAG BIT(0)
 #define NVME_KV_STORE_EXCLUSIVE_FLAG BIT(1)
@@ -1548,37 +1651,82 @@ static void pci_epf_nvme_exec_kv_cmd(struct pci_epf_nvme_cmd *epcmd)
 			break;
 		case nvme_cmd_kv_delete:
 			epcmd->dma_dir = DMA_NONE;
-			if (file_doesnt_exist(kv_path/*, epcmd*/)) {
-				dev_info(&epf_nvme->epf->dev,
-					"File %s does NOT exist\n", kv_path);
-				epcmd->status = KV_ERR_KEY_NOT_EXIST;
-				break;
-			} else {
-				dev_info(&epf_nvme->epf->dev,
-					"File %s does exist\n", kv_path);
-				ret = 1;
-				value_size = 0;
-				kv_file = filp_open(kv_path, O_RDONLY, 0666);
-				if (!kv_file || IS_ERR(kv_file)) {
+			if (ednek) {
+				if (file_doesnt_exist(kv_path/*, epcmd*/)) {
 					dev_info(&epf_nvme->epf->dev,
-						"Could NOT open file %s\n",
+						"File %s does NOT exist\n", 
 						kv_path);
 					epcmd->status = KV_ERR_KEY_NOT_EXIST;
 					break;
+				} else {
+					dev_info(&epf_nvme->epf->dev,
+						"File %s does exist\n", 
+						kv_path);
+					ret = 1;
+					value_size = 0;
+					kv_file = filp_open(kv_path, O_RDONLY, 
+							    0666);
+					if (!kv_file || IS_ERR(kv_file)) {
+						dev_info(&epf_nvme->epf->dev,
+							"Could NOT open " 
+							"file %s\n",
+							kv_path);
+						epcmd->status = 
+							KV_ERR_KEY_NOT_EXIST;
+						break;
+					}
+					while(ret != 0) {
+						ret = kernel_read(kv_file,
+								buffer, 
+								PAGE_SIZE,
+								&file_offset);
+						value_size += ret;
+					}
+					actual_size += key_length;
+					actual_size += value_size;
+					delete_file(kv_path);
+					epcmd->status = KV_SUCCESS;
+					dev_info(&epf_nvme->epf->dev,
+						"File deleted successfully\n");
+					break;
 				}
-				while(ret != 0) {
-					ret = kernel_read(kv_file,
-							  buffer, PAGE_SIZE,
-							  &file_offset);
-					value_size += ret;
+			}
+			else {
+				if (file_doesnt_exist(kv_path/*, epcmd*/)) {
+					epcmd->status = KV_SUCCESS;
+					break;
+				} else {
+					dev_info(&epf_nvme->epf->dev,
+						"File %s does exist\n", 
+						kv_path);
+					ret = 1;
+					value_size = 0;
+					kv_file = filp_open(kv_path, O_RDONLY, 
+							    0666);
+					if (!kv_file || IS_ERR(kv_file)) {
+						dev_info(&epf_nvme->epf->dev,
+							"Could NOT open "
+							"file %s\n",
+							kv_path);
+						epcmd->status = 
+							KV_ERR_KEY_NOT_EXIST;
+						break;
+					}
+					while(ret != 0) {
+						ret = kernel_read(kv_file,
+								buffer, 
+								PAGE_SIZE,
+								&file_offset);
+						value_size += ret;
+					}
+					actual_size += key_length;
+					actual_size += value_size;
+					delete_file(kv_path);
+					epcmd->status = KV_SUCCESS;
+					dev_info(&epf_nvme->epf->dev,
+						"File deleted successfully\n");
+					break;
 				}
-				actual_size += key_length;
-				actual_size += value_size;
-				delete_file(kv_path);
-				epcmd->status = KV_SUCCESS;
-				dev_info(&epf_nvme->epf->dev,
-					"File deleted successfully\n");
-				break;
 			}
 
 		case nvme_cmd_kv_exist:
@@ -2471,9 +2619,11 @@ static void pci_epf_nvme_identify_hook(struct pci_epf_nvme_cmd *epcmd)
 	struct nvme_command *cmd = &epcmd->cmd;
 	struct nvme_id_ctrl *id = epcmd->buffer;
 	unsigned int page_shift;
-
-	if (cmd->identify.cns != NVME_ID_CNS_CTRL)
+	dev_info(&epf_nvme->epf->dev, "4");
+	if (cmd->identify.cns != NVME_ID_CNS_CTRL) {
+		dev_info(&epf_nvme->epf->dev, "5");
 		return;
+	}
 
 	/* Set device vendor IDs */
 	id->vid = cpu_to_le16(epf_nvme->epf->header->vendorid);
@@ -2578,6 +2728,13 @@ static bool pci_epf_nvme_process_set_features(struct pci_epf_nvme_cmd *epcmd)
 	} else if (feat == NVME_FEAT_ARBITRATION) {
 		epcmd->status = NVME_SC_SUCCESS;
 		return true;
+	} else if (feat == NVME_KV_KEY_VALUE_CONFIG) {
+		ednek = epcmd->cmd.common.cdw11 & BIT(0);
+		dev_info(&epf_nvme->epf->dev,
+					 "EDNEK = %d\n",
+					 ednek);
+		epcmd->status = NVME_SC_SUCCESS;
+		return true;
 	} else
 		return false;
 }
@@ -2587,8 +2744,10 @@ static void pci_epf_nvme_process_admin_cmd(struct pci_epf_nvme_cmd *epcmd)
 	struct pci_epf_nvme *epf_nvme = epcmd->epf_nvme;
 	void (*post_exec_hook)(struct pci_epf_nvme_cmd *) = NULL;
 	struct nvme_command *cmd = &epcmd->cmd;
-	//int ret;
-
+	int ret;
+	struct namespace_data_structure nds;
+	memset(&nds, 0, sizeof(nds));
+	struct KVF kvf0 = {0};
 	switch (cmd->common.opcode) {
 	case nvme_admin_identify:
 		post_exec_hook = pci_epf_nvme_identify_hook;
@@ -2597,6 +2756,43 @@ static void pci_epf_nvme_process_admin_cmd(struct pci_epf_nvme_cmd *epcmd)
 			pci_epf_nvme_cmd_name(epcmd), cmd->identify.cns);
 		epcmd->buffer_size = NVME_IDENTIFY_DATA_SIZE;
 		epcmd->dma_dir = DMA_TO_DEVICE;
+
+		if (cmd->identify.cns == 0x05 && cmd->identify.csi == 0x01) {
+			/* Setup the command buffer */
+			ret = pci_epf_nvme_cmd_parse_dptr(epcmd);
+			if (ret)
+				return;
+			((struct namespace_data_structure *)epcmd->buffer)->NSZE 
+					= DISK_SPACE;
+			((struct namespace_data_structure *)epcmd->buffer)->NUSE 
+					= DISK_SPACE - actual_size;
+			((struct namespace_data_structure *)epcmd->buffer)->NKVF 
+					= 1;
+			/*memcpy(((struct namespace_data_structure *)
+				epcmd->buffer)->
+				namespace_globally_unique_identifier, 
+				epcmd->ns->head->ids.nguid, 
+				sizeof(epcmd->ns->head->ids.nguid));*/
+			/*memcpy(((struct namespace_data_structure *)
+				epcmd->buffer)->EUI64, 
+				epcmd->ns->head->ids.eui64, 
+				sizeof(epcmd->ns->head->ids.eui64));*/
+			kvf0.KV_key_max_length = 16;
+			kvf0.KV_value_max_length = MAX_NUM_VALUE_SIZE;
+			((struct namespace_data_structure *)epcmd->buffer)->KVF0
+					 = kvf0;
+			pci_epf_nvme_transfer_cmd_data(epcmd);
+			DumpHex(epcmd->buffer, epcmd->buffer_size, epcmd);
+			goto complete;
+		} else if (cmd->identify.cns == 0x06 && 
+			   cmd->identify.csi == 0x01)  {
+			ret = pci_epf_nvme_cmd_parse_dptr(epcmd);
+			if (ret)
+				return;
+			memcpy(epcmd->buffer, &nds, sizeof(nds));
+			pci_epf_nvme_transfer_cmd_data(epcmd);
+			goto complete;
+		}
 		break;
 
 	case nvme_admin_get_log_page:
@@ -2674,12 +2870,21 @@ static void pci_epf_nvme_process_io_cmd(struct pci_epf_nvme_cmd *epcmd,
 	struct nvme_kv_common_command *cmd = (struct nvme_kv_common_command *)
 					      &epcmd->cmd.common;
 
+	/* Get the command target namespace */
+	epcmd->ns = nvme_find_get_ns(epf_nvme->ctrl.ctrl,
+				     le32_to_cpu(epcmd->cmd.common.nsid));
+	if (!epcmd->ns) {
+		epcmd->status = NVME_SC_INVALID_NS | NVME_SC_DNR;
+		goto complete;
+	}
+
 	if (cmd->opcode & NVME_DIRECTION_TO_HOST_BIT)
 		epcmd->dma_dir = DMA_TO_DEVICE;
 	if (cmd->opcode & NVME_DIRECTION_FROM_HOST_BIT)
 		epcmd->dma_dir = DMA_FROM_DEVICE;
 
 	queue_work(sq->cmd_wq, &epcmd->io_work);
+	return;
 
 	#if 0
 	struct nvme_kv_common_command *cmd = (struct nvme_kv_common_command *)
@@ -2945,10 +3150,10 @@ static void pci_epf_nvme_process_io_cmd(struct pci_epf_nvme_cmd *epcmd,
 	}
 	*/
 	return;
+#endif
 
 complete:
 	pci_epf_nvme_complete_cmd(epcmd);
-	#endif
 }
 
 static void pci_epf_nvme_sq_work(struct work_struct *work)
@@ -3269,6 +3474,16 @@ static int pci_epf_nvme_link_up(struct pci_epf *epf)
 static int pci_epf_nvme_link_down(struct pci_epf *epf)
 {
 	struct pci_epf_nvme *epf_nvme = epf_get_drvdata(epf);
+
+	struct file *kv_file = NULL;
+	pr_info("ACTUAL SIZE %zu\n", actual_size);
+	//file where the actual size will be saved
+	kv_file = filp_open(DISK_ACTUAL_SIZE_PATH, O_RDWR | O_CREAT, 0666);
+	kernel_write(kv_file, &actual_size, sizeof(actual_size), 0);
+	filp_close(kv_file, NULL);
+
+	pr_info("\t---- ACTUAL SIZE %zu ---- \n", actual_size);
+
 
 	dev_info(&epf->dev, "Link DOWN\n");
 
@@ -3596,7 +3811,7 @@ static struct pci_epf_driver epf_nvme_driver = {
 static int __init pci_epf_nvme_init(void)
 {
 	int ret;
-
+	ednek = 0;
 	if (file_doesnt_exist(DISK_ACTUAL_SIZE_PATH)) {
 		//file doesn't exist actual size is disk space
 		actual_size = DISK_SPACE;
@@ -3644,7 +3859,7 @@ static void __exit pci_epf_nvme_exit(void)
 	pr_info("ACTUAL SIZE %zu\n", actual_size);
 	//file where the actual size will be saved
 	kv_file = filp_open(DISK_ACTUAL_SIZE_PATH, O_RDWR | O_CREAT, 0666);
-	int ret = kernel_write(kv_file, &actual_size, sizeof(actual_size), 0);
+	kernel_write(kv_file, &actual_size, sizeof(actual_size), 0);
 	filp_close(kv_file, NULL);
 
 	pr_info("\t---- ACTUAL SIZE %zu ---- \n", actual_size);
