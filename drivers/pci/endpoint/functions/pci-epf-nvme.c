@@ -248,6 +248,7 @@ struct namespace_data_structure {
 #define MAX_NUM_VALUE_SIZE (4294967295U)
 #define DISK_SPACE 1024
 #define NVME_KV_KEY_VALUE_CONFIG 0x20
+#define KV_KEY_MAX_LENGTH 16
 
 size_t actual_size;
 int ednek;
@@ -2748,6 +2749,12 @@ static void pci_epf_nvme_process_admin_cmd(struct pci_epf_nvme_cmd *epcmd)
 	struct namespace_data_structure nds;
 	memset(&nds, 0, sizeof(nds));
 	struct KVF kvf0 = {0};
+	/*epcmd->ns = nvme_find_get_ns(epf_nvme->ctrl.ctrl,
+				     le32_to_cpu(epcmd->cmd.common.nsid));
+	if (!epcmd->ns) {
+		epcmd->status = NVME_SC_INVALID_NS | NVME_SC_DNR;
+		goto complete;
+	}*/
 	switch (cmd->common.opcode) {
 	case nvme_admin_identify:
 		post_exec_hook = pci_epf_nvme_identify_hook;
@@ -2769,20 +2776,18 @@ static void pci_epf_nvme_process_admin_cmd(struct pci_epf_nvme_cmd *epcmd)
 			((struct namespace_data_structure *)epcmd->buffer)->NKVF 
 					= 1;
 			/*memcpy(((struct namespace_data_structure *)
-				epcmd->buffer)->
-				namespace_globally_unique_identifier, 
+				epcmd->buffer)->NGUID, 
 				epcmd->ns->head->ids.nguid, 
-				sizeof(epcmd->ns->head->ids.nguid));*/
-			/*memcpy(((struct namespace_data_structure *)
+				sizeof(epcmd->ns->head->ids.nguid));
+			memcpy(((struct namespace_data_structure *)
 				epcmd->buffer)->EUI64, 
 				epcmd->ns->head->ids.eui64, 
 				sizeof(epcmd->ns->head->ids.eui64));*/
-			kvf0.KV_key_max_length = 16;
+			kvf0.KV_key_max_length = KV_KEY_MAX_LENGTH;
 			kvf0.KV_value_max_length = MAX_NUM_VALUE_SIZE;
 			((struct namespace_data_structure *)epcmd->buffer)->KVF0
 					 = kvf0;
 			pci_epf_nvme_transfer_cmd_data(epcmd);
-			DumpHex(epcmd->buffer, epcmd->buffer_size, epcmd);
 			goto complete;
 		} else if (cmd->identify.cns == 0x06 && 
 			   cmd->identify.csi == 0x01)  {
@@ -2867,6 +2872,7 @@ static inline size_t pci_epf_nvme_rw_data_len(struct pci_epf_nvme_cmd *epcmd)
 static void pci_epf_nvme_process_io_cmd(struct pci_epf_nvme_cmd *epcmd,
 					struct pci_epf_nvme_queue *sq)
 {
+	struct pci_epf_nvme *epf_nvme = epcmd->epf_nvme;
 	struct nvme_kv_common_command *cmd = (struct nvme_kv_common_command *)
 					      &epcmd->cmd.common;
 
