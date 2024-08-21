@@ -1895,16 +1895,47 @@ static void pci_epf_nvme_exec_cmd(struct pci_epf_nvme_cmd *epcmd,
 		pci_epf_nvme_transfer_cmd_data(epcmd);
 }
 
+static inline size_t pci_epf_nvme_rw_data_len(struct pci_epf_nvme_cmd *epcmd)
+{
+	return ((u32)le16_to_cpu(epcmd->cmd.rw.length) + 1) <<
+		epcmd->ns->head->lba_shift;
+}
+
 static void pci_epf_nvme_io_cmd_work(struct work_struct *work)
 {
 	struct pci_epf_nvme_cmd *epcmd =
 		container_of(work, struct pci_epf_nvme_cmd, io_work);
 
-	if (!KV) /* NVM commands */
+	if (!KV) { /* NVM commands */
+		switch (epcmd->cmd.common.opcode) {
+		case nvme_cmd_read:
+		case nvme_cmd_write:
+			epcmd->buffer_size = pci_epf_nvme_rw_data_len(epcmd);
+			break;
+
+		case nvme_cmd_dsm:
+			epcmd->buffer_size = (le32_to_cpu(epcmd->cmd.dsm.nr) + 1) *
+				sizeof(struct nvme_dsm_range);
+			epcmd->dma_dir = DMA_FROM_DEVICE;
+			goto complete;
+
+		case nvme_cmd_flush:
+		case nvme_cmd_write_zeroes:
+			break;
+
+		default:
+			dev_err(&epcmd->epf_nvme->epf->dev,
+				"Unhandled IO command %s (0x%02x)\n",
+				pci_epf_nvme_cmd_name(epcmd),
+				epcmd->cmd.common.opcode);
+			epcmd->status = NVME_SC_INVALID_OPCODE | NVME_SC_DNR;
+			goto complete;
+		}
 		pci_epf_nvme_exec_cmd(epcmd, NULL);
-	else /* KV commands */
+	} else /* KV commands */
 		pci_epf_nvme_exec_kv_cmd(epcmd);
 
+complete:
 	pci_epf_nvme_complete_cmd(epcmd);
 }
 
@@ -2956,12 +2987,6 @@ static void pci_epf_nvme_process_admin_cmd(struct pci_epf_nvme_cmd *epcmd)
 
 complete:
 	pci_epf_nvme_complete_cmd(epcmd);
-}
-
-static inline size_t pci_epf_nvme_rw_data_len(struct pci_epf_nvme_cmd *epcmd)
-{
-	return ((u32)le16_to_cpu(epcmd->cmd.rw.length) + 1) <<
-		epcmd->ns->head->lba_shift;
 }
 
 static void pci_epf_nvme_process_io_cmd(struct pci_epf_nvme_cmd *epcmd,
