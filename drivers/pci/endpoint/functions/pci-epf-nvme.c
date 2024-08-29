@@ -6,6 +6,7 @@
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+#define DMA_TIMEOUT_MS 5000
 
 #include <linux/delay.h>
 #include <linux/dmaengine.h>
@@ -102,6 +103,7 @@ struct nvme_kv_common_command {
 	);
 };
 
+
 /*
  * Structure of a KV store command
  */
@@ -124,6 +126,7 @@ struct nvme_kv_store_command {
 	__le32			cdw15;
 	);
 };
+
 
 /*
  * Key data structure
@@ -176,8 +179,100 @@ struct KVF {
 } __packed;
 
 /*
+ * I/O Command Set Independent Identify Namespace Data Structure for CNS = 0x08
+ */
+struct namespace_data_structure_0x08 {
+	union {
+		u8 NSFEAT;
+		struct
+		{
+			u8 resvd1 : 3;
+			u8 UIDREUSE : 1;
+			u8 RMEDIA : 1;
+			u8 VWCNP : 1;
+			u8 resvd2 : 2;
+		} __packed;
+	};
+	union {
+		u8 NMIC;
+		struct
+		{
+			u8 SHRNS : 1;
+			u8 DISNS : 1;
+			u8 rsvd : 6;
+		} __packed;
+	};
+	union {
+		u8 RESCAP;
+		struct
+		{
+			u8 PTPLS : 1;
+			u8 WES : 1;
+			u8 EAS : 1;
+			u8 WEROS : 1;
+			u8 EAROS : 1;
+			u8 WEARS : 1;
+			u8 EAARS : 1;
+			u8 IEKS : 1;
+		} __packed;
+	};
+	union {
+		u8 FPI;
+		struct
+		{
+			u8 RFNVM : 7;
+			u8 FPIS : 1;
+		} __packed;
+	};
+	u32	ANAGRPID;
+	union {
+		u8 NSATTR;
+		struct
+		{
+			u8 CWP : 1;
+			u8 resvd : 7;
+		} __packed;
+	};
+	u8 	rsvd1;
+	u16	NVMSETID;
+	u16 	ENDGID;
+	union {
+		u8 NSTAT;
+		struct
+		{
+			u8 NRDY : 1;
+			u8 IOI : 2;
+			u8 resevd : 5;
+		} __packed;
+	};
+	union {
+		u8 KPIOS;
+		struct
+		{
+			u8 KPIOENS : 1;
+			u8 KPIOSNS : 1;
+			u8 reseved : 6;
+		} __packed;
+	};
+	u16	MAXKT;
+	u16 	rsvd2;
+	u32	RGRPID;
+	u8	rsvd3[4072];
+} __packed;
+
+/*
  * I/O Command Set Specific Identify Namespace Data structure, Key Value Type
- * Specific
+ * Specific for CNS = 0x06
+ */
+struct namespace_data_structure_0x06 {
+	u32 	version;
+	u8	rsvd[4092];
+} __packed;
+
+
+/*
+ * I/O Command Set Specific Identify Namespace Data structure, Key Value Type
+ * Specific for CNS = 0x05
  */
 struct namespace_data_structure {
 	u64	NSZE;			//mandatory
@@ -225,7 +320,15 @@ struct namespace_data_structure {
 			u8 FPIS : 1;
 		} __packed;
 	};
-	u32	rsvd2 : 24;
+	union {
+		u8 KVFC;
+		struct
+		{
+			u8 KVFI : 4;
+			u8 resvd : 4;
+		} __packed;
+	};
+	u16	rsvd2;
 	u32	NOVG;
 	u32	ANAGRPID;
 	u32	rsvd3 : 24;
@@ -270,9 +373,11 @@ struct namespace_data_structure {
 #define NVME_KV_MAX_PRINTABLE_KEY_LEN (NVME_KV_MAX_KEY_LEN*2)
 #define KV_PATH_LEN (KV_BASE_PATH_LEN+NVME_KV_MAX_PRINTABLE_KEY_LEN+1)
 #define MAX_NUM_VALUE_SIZE (4294967295U)
-#define DISK_SPACE 1024
+#define DISK_SPACE MAX_NUM_VALUE_SIZE
 #define NVME_KV_KEY_VALUE_CONFIG 0x20
 #define KV_KEY_MAX_LENGTH 16
+#define CSI_MASK 0x00FFFFFF
+#define IO_COMMAND_COMBINATION_REJECTED 0x15
 
 /*
  * Variable that keeps the size that is free
@@ -295,9 +400,29 @@ int KV;
 #define NVME_DIRECTION_TO_HOST_BIT BIT(1)
 #define NVME_DIRECTION_FROM_HOST_BIT BIT(0)
 
+/*
+ * bit 6 of the cc.css field
+ */
+#define NVME_IO_COMMAND_SET_SUPPORT_BIT BIT(43)
+
+#define NVME_CONTROLLER_CONFIGURATION_BIT4 BIT(4)
+#define NVME_CONTROLLER_CONFIGURATION_BIT5 BIT(5)
+#define NVME_CONTROLLER_CONFIGURATION_BIT6 BIT(6)
+
+/*
+ * path of the file where the free space is stored
+ */
 #define DISK_ACTUAL_SIZE_PATH "/kv_metadata/actual_size"
 
 #define NVME_CSI_KV 0x01
+#define NVME_CSI_NVM_COMMAND_SET 0x00
+#define NVME_CSI_ZNS 0x02
+#define COMMAND_SET_PROFILE 0x19
+
+/*
+ * Mask to get the 8 lower bits of a u32 variable
+ */
+#define LOWER_BITS_MASK 0x000f
 
 /* PRP manipulation macros */
 #define pci_epf_nvme_prp_addr(ctrl, prp)	((prp) & ~(ctrl)->mps_mask)
@@ -554,10 +679,10 @@ static bool pci_epf_nvme_init_dma(struct pci_epf_nvme *epf_nvme)
 	}
 	epf_nvme->dma_chan_tx = chan;
 
-	dev_info(dev, "DMA RX channel %s, maximum segment size %u B\n",
+	dev_dbg(dev, "DMA RX channel %s, maximum segment size %u B\n",
 		 dma_chan_name(epf_nvme->dma_chan_rx),
 		 dma_get_max_seg_size(epf_nvme->dma_chan_rx->device->dev));
-	dev_info(dev, "DMA TX channel %s, maximum segment size %u B\n",
+	dev_dbg(dev, "DMA TX channel %s, maximum segment size %u B\n",
 		 dma_chan_name(epf_nvme->dma_chan_tx),
 		 dma_get_max_seg_size(epf_nvme->dma_chan_tx->device->dev));
 
@@ -1266,7 +1391,7 @@ static void DumpHex(const void* data, size_t size,
 	size_t i, j;
 	ascii[16] = '\0';
 	for (i = 0; i < size; ++i) {
-		dev_info(&epf_nvme->epf->dev, "%02X ",
+		dev_dbg(&epf_nvme->epf->dev, "%02X ",
 			 ((unsigned char*)data)[i]);
 		if (((unsigned char*)data)[i] >= ' ' &&
 		    ((unsigned char*)data)[i] <= '~') {
@@ -1297,11 +1422,12 @@ static void DumpHex(const void* data, size_t size,
 static int __hex_to_bin(const char *input, int input_length,
 			char *output, int output_length)
 {
-    	// Ensure the input has an even number of characters
 	if (input_length == 0) {
 		pr_err("Length equals 0\n");
 		return 0;
-	}else if (input_length % 2 != 0) {
+	}
+	// Ensure the input has an even number of characters
+	else if (input_length % 2 != 0) {
 		pr_err("Hexadecimal string must have an even number of "
 			"characters\n");
 		return 0;
@@ -1417,7 +1543,6 @@ static void pci_epf_nvme_exec_kv_cmd(struct pci_epf_nvme_cmd *epcmd)
 	struct file *fp = NULL;
 	char *buf, *path;
 	struct kv_readdir_data readdir_data;
-
 	size_t effective_value_size = 0;
 
 	if (epcmd->ns)
@@ -1442,7 +1567,7 @@ static void pci_epf_nvme_exec_kv_cmd(struct pci_epf_nvme_cmd *epcmd)
 		}
 	}
 
-	dev_info(&epf_nvme->epf->dev,
+	dev_dbg(&epf_nvme->epf->dev,
 		 "KV Command %s\n", pci_epf_nvme_kv_cmd_name(epcmd));
 
 
@@ -1452,7 +1577,7 @@ static void pci_epf_nvme_exec_kv_cmd(struct pci_epf_nvme_cmd *epcmd)
 	    epcmd->cmd.common.opcode == nvme_cmd_kv_list ||
 	    epcmd->cmd.common.opcode == nvme_cmd_kv_delete) {
 
-		dev_info(&epf_nvme->epf->dev, "It is a KV Command");
+		dev_dbg(&epf_nvme->epf->dev, "It is a KV Command");
 
 		if(key_length > 16 || key_length <= 0) {
 			dev_err(&epf_nvme->epf->dev,
@@ -1471,7 +1596,7 @@ static void pci_epf_nvme_exec_kv_cmd(struct pci_epf_nvme_cmd *epcmd)
 				     key_length - sizeof(key_lsb),
 				     path_key_ptr + sizeof(key_lsb)*2);
 		}
-		dev_info(&epf_nvme->epf->dev,
+		dev_dbg(&epf_nvme->epf->dev,
 		 	 "Key length: %d Key value: %s\n", key_length,
 			 kv_path);
 	}
@@ -1489,6 +1614,10 @@ static void pci_epf_nvme_exec_kv_cmd(struct pci_epf_nvme_cmd *epcmd)
 			if (file_doesnt_exist(kv_path)) {	//insert
 
 				if (value_size > actual_size) {
+					dev_err(&epf_nvme->epf->dev,
+						"Could not write to file, " 
+						"capacity exceeded %s\n",
+						kv_path);
 					epcmd->status =
 						KV_ERR_CAPACITY_EXCEEDED;
 					break;
@@ -1518,7 +1647,7 @@ static void pci_epf_nvme_exec_kv_cmd(struct pci_epf_nvme_cmd *epcmd)
 						KV_ERR_UNRECOVERED_ERROR;
 					break;
 				} else {
-					dev_info(&epf_nvme->epf->dev,
+					dev_dbg(&epf_nvme->epf->dev,
 						"Writing data to file: %s\n",
 						kv_path);
 					ret = kernel_write(kv_file,
@@ -1533,21 +1662,21 @@ static void pci_epf_nvme_exec_kv_cmd(struct pci_epf_nvme_cmd *epcmd)
 						    KV_ERR_UNRECOVERED_ERROR;
 						break;
 					}
-					dev_info(&epf_nvme->epf->dev,
+					dev_dbg(&epf_nvme->epf->dev,
 					"\t---- ACTUAL SIZE BEFORE %zu ---- \n",
 					actual_size);
-					dev_info(&epf_nvme->epf->dev,
+					dev_dbg(&epf_nvme->epf->dev,
 					"\t---- VALUE SIZE SIZE %d ---- \n",
 					store_cmd->value_size);
 					actual_size -= store_cmd->value_size;
 					actual_size -= key_length;
-					dev_info(&epf_nvme->epf->dev,
+					dev_dbg(&epf_nvme->epf->dev,
 						"ACTUAL SIZE: %zu\n",
 						actual_size);
 				}
 			}
 			else {					//update
-				dev_info(&epf_nvme->epf->dev, "Is an UPDATE");
+				dev_dbg(&epf_nvme->epf->dev, "Is an UPDATE");
 				//if bit 9 is set to 1
 				if(store_cmd->so &
 				   NVME_KV_STORE_EXCLUSIVE_FLAG) {
@@ -1564,28 +1693,25 @@ static void pci_epf_nvme_exec_kv_cmd(struct pci_epf_nvme_cmd *epcmd)
 				file_offset = 0;
 				kv_file = filp_open(kv_path, O_RDWR | O_CREAT,
 						    0666);
-				while(ret != 0) {
-					ret = kernel_read(kv_file,
-							  dump_read_buffer, 
-							  PAGE_SIZE,
-							  &file_offset);
-					previous_value_size += ret;
-				}dev_info(&epf_nvme->epf->dev,
+						    
+				previous_value_size = vfs_llseek(kv_file, 0, 
+					 		 	  SEEK_END);
+				dev_dbg(&epf_nvme->epf->dev,
 					"\t---- ACTUAL SIZE BEFORE %zu ---- \n",
 					actual_size);
-				dev_info(&epf_nvme->epf->dev,
+				dev_dbg(&epf_nvme->epf->dev,
 				"\t---- PREVIOUS VALUE SIZE SIZE %d ---- \n",
 					previous_value_size);
 				actual_size += previous_value_size;
 				if (value_size > actual_size) {
 					actual_size -= previous_value_size;
-					dev_info(&epf_nvme->epf->dev,
+					dev_dbg(&epf_nvme->epf->dev,
 						 "The Update could NOT be done,"
 						 "not enough space aviable,"
 						 " file stays as before\n");
 					epcmd->status =
 						KV_ERR_CAPACITY_EXCEEDED;
-					dev_info(&epf_nvme->epf->dev,
+					dev_dbg(&epf_nvme->epf->dev,
 						 "\t---- ACTUAL SIZE SUM "
 						 "PREVIOUS %zu ---- \n",
 						 actual_size);
@@ -1594,7 +1720,7 @@ static void pci_epf_nvme_exec_kv_cmd(struct pci_epf_nvme_cmd *epcmd)
 				delete_file(kv_path);
 				kv_file = filp_open(kv_path, O_RDWR | O_CREAT,
 						    0666);
-				dev_info(&epf_nvme->epf->dev,
+				dev_dbg(&epf_nvme->epf->dev,
 					"Writing data to file: %s\n",
 					kv_path);
 				ret = kernel_write(kv_file,
@@ -1609,16 +1735,16 @@ static void pci_epf_nvme_exec_kv_cmd(struct pci_epf_nvme_cmd *epcmd)
 						KV_ERR_UNRECOVERED_ERROR;
 					break;
 				}
-				dev_info(&epf_nvme->epf->dev,
+				dev_dbg(&epf_nvme->epf->dev,
 					"\t---- VALUE SIZE SIZE %d ---- \n",
 					store_cmd->value_size);
 				actual_size -= store_cmd->value_size;
-				dev_info(&epf_nvme->epf->dev,
+				dev_dbg(&epf_nvme->epf->dev,
 					"ACTUAL SIZE: %zu\n",
 					actual_size);
 			}
 			epcmd->status = KV_SUCCESS;
-			dev_info(&epf_nvme->epf->dev,
+			dev_dbg(&epf_nvme->epf->dev,
 				 "File written successfully\n");
 			break;
 		case nvme_cmd_kv_retrieve:
@@ -1629,13 +1755,13 @@ static void pci_epf_nvme_exec_kv_cmd(struct pci_epf_nvme_cmd *epcmd)
 			}
 			kv_file = filp_open(kv_path, O_RDONLY, 0666);
 			if (!kv_file || IS_ERR(kv_file)) {
-				dev_info(&epf_nvme->epf->dev,
+				dev_dbg(&epf_nvme->epf->dev,
 					 "File %s does not exist\n",
 					 kv_path);
 				epcmd->status = KV_ERR_KEY_NOT_EXIST;
 				break;
 			}else {
-				dev_info(&epf_nvme->epf->dev,
+				dev_dbg(&epf_nvme->epf->dev,
 					 "Reading data from file: %s\n",
 					 kv_path);
 				file_offset = 0;
@@ -1650,116 +1776,76 @@ static void pci_epf_nvme_exec_kv_cmd(struct pci_epf_nvme_cmd *epcmd)
 						KV_ERR_UNRECOVERED_ERROR;
 					break;
 				}
-				effective_value_size = ret;
-				while(ret) {
-					ret = kernel_read(kv_file,
-							  dump_read_buffer,
-							  PAGE_SIZE,
-							  &file_offset);
-					if (ret < 0) {
-						epcmd->status =
-						      KV_ERR_UNRECOVERED_ERROR;
-						break;
-					}
-					effective_value_size += ret;
-				}
+				effective_value_size = vfs_llseek(kv_file, 0, 
+					 		 	  SEEK_END);
+				dev_dbg(&epf_nvme->epf->dev,
+					 "VFS_LLSEEK: %zu\n",
+					 effective_value_size);	
+				
 				/* Return effective value size in CQE */
 				epcmd->cqe.result.u32 = effective_value_size;
 			}
 			epcmd->status = KV_SUCCESS;
-			dev_info(&epf_nvme->epf->dev,
+			dev_dbg(&epf_nvme->epf->dev,
 				 "File read successfully\n");
-			DumpHex(epcmd->buffer, epcmd->buffer_size, epcmd);
+			//DumpHex(epcmd->buffer, epcmd->buffer_size, epcmd);
 			break;
 		case nvme_cmd_kv_delete:
 			epcmd->dma_dir = DMA_NONE;
-			if (ednek) {
-				if (file_doesnt_exist(kv_path)) {
-					dev_info(&epf_nvme->epf->dev,
+			
+			if (file_doesnt_exist(kv_path)) {
+				if(ednek) {
+					dev_dbg(&epf_nvme->epf->dev,
 						"File %s does NOT exist\n",
 						kv_path);
 					epcmd->status = KV_ERR_KEY_NOT_EXIST;
 					break;
-				} else {
-					dev_info(&epf_nvme->epf->dev,
-						"File %s does exist\n",
-						kv_path);
-					ret = 1;
-					value_size = 0;
-					kv_file = filp_open(kv_path, O_RDONLY,
-							    0666);
-					if (!kv_file || IS_ERR(kv_file)) {
-						dev_info(&epf_nvme->epf->dev,
-							"Could NOT open "
-							"file %s\n",
-							kv_path);
-						epcmd->status =
-							KV_ERR_KEY_NOT_EXIST;
-						break;
-					}
-					while(ret != 0) {
-						ret = kernel_read(kv_file,
-								dump_read_buffer,
-								PAGE_SIZE,
-								&file_offset);
-						value_size += ret;
-					}
-					actual_size += key_length;
-					actual_size += value_size;
-					delete_file(kv_path);
+				}
+				else {
 					epcmd->status = KV_SUCCESS;
-					dev_info(&epf_nvme->epf->dev,
-						"File deleted successfully\n");
+					break;	
+				}
+			} else {
+				dev_dbg(&epf_nvme->epf->dev,
+					"File %s does exist\n",
+					kv_path);
+				ret = 1;
+				value_size = 0;
+				kv_file = filp_open(kv_path, O_RDONLY,
+							0666);
+				if (!kv_file || IS_ERR(kv_file)) {
+					dev_dbg(&epf_nvme->epf->dev,
+						"Could NOT open "
+						"file %s\n",
+						kv_path);
+					epcmd->status =
+						KV_ERR_KEY_NOT_EXIST;
 					break;
 				}
-			}
-			else {
-				if (file_doesnt_exist(kv_path)) {
-					epcmd->status = KV_SUCCESS;
-					break;
-				} else {
-					dev_info(&epf_nvme->epf->dev,
-						"File %s does exist\n",
-						kv_path);
-					ret = 1;
-					value_size = 0;
-					kv_file = filp_open(kv_path, O_RDONLY,
-							    0666);
-					if (!kv_file || IS_ERR(kv_file)) {
-						dev_info(&epf_nvme->epf->dev,
-							"Could NOT open "
-							"file %s\n",
-							kv_path);
-						epcmd->status =
-							KV_ERR_KEY_NOT_EXIST;
-						break;
-					}
-					while(ret != 0) {
-						ret = kernel_read(kv_file,
-								dump_read_buffer,
-								PAGE_SIZE,
-								&file_offset);
-						value_size += ret;
-					}
-					actual_size += key_length;
-					actual_size += value_size;
-					delete_file(kv_path);
-					epcmd->status = KV_SUCCESS;
-					dev_info(&epf_nvme->epf->dev,
-						"File deleted successfully\n");
-					break;
+				while(ret != 0) {
+					ret = kernel_read(kv_file,
+							dump_read_buffer,
+							PAGE_SIZE,
+							&file_offset);
+					value_size += ret;
 				}
+				actual_size += key_length;
+				actual_size += value_size;
+				delete_file(kv_path);
+				epcmd->status = KV_SUCCESS;
+				dev_dbg(&epf_nvme->epf->dev,
+					"File deleted successfully\n");
+				break;
 			}
-
 		case nvme_cmd_kv_exist:
 			epcmd->dma_dir = DMA_NONE;
 			if (file_doesnt_exist(kv_path)) {
-				dev_info(&epf_nvme->epf->dev,
+				dev_dbg(&epf_nvme->epf->dev,
 					"File %s does NOT exist\n", kv_path);
 				epcmd->status = KV_ERR_KEY_NOT_EXIST;
 				break;
 			}else {
-				dev_info(&epf_nvme->epf->dev,
+				dev_dbg(&epf_nvme->epf->dev,
 					"File %s does exist\n", kv_path);
 				epcmd->status = KV_SUCCESS;
 				break;
@@ -1770,24 +1856,24 @@ static void pci_epf_nvme_exec_kv_cmd(struct pci_epf_nvme_cmd *epcmd)
 				epcmd->status = KV_ERR_INVALID_BUFFER_SIZE;
 				break;
 			}
-			dev_info(&epf_nvme->epf->dev,
+			dev_dbg(&epf_nvme->epf->dev,
 				 "\t--- NVME KV LIST ---\n");
 			fp = filp_open("/kv", O_RDONLY | O_NONBLOCK | O_CLOEXEC
 				       | O_DIRECTORY, 0);
 			if (fp == NULL) {
 				epcmd->status =
 					KV_ERR_INVALID_NAMESPACE_OR_FORMAT;
-				dev_info(&epf_nvme->epf->dev,
+				dev_dbg(&epf_nvme->epf->dev,
 				 	 "Error opening the directory\n");
 				break;
 			}
-			dev_info(&epf_nvme->epf->dev,
+			dev_dbg(&epf_nvme->epf->dev,
 				 "Directory successfully open\n");
 			buf = __getname();
 			if (!buf) {
 				epcmd->status = NVME_SC_INTERNAL;
 				filp_close(fp, NULL);
-				dev_info(&epf_nvme->epf->dev,
+				dev_err(&epf_nvme->epf->dev,
 				 	 "Error allocating memory\n");
 				break;
 			}
@@ -1801,7 +1887,7 @@ static void pci_epf_nvme_exec_kv_cmd(struct pci_epf_nvme_cmd *epcmd)
 			readdir_data.number_of_keys = 0;
 			readdir_data.buffer_of_keys = epcmd->buffer;
 			if (!readdir_data.buffer_of_keys) {
-				dev_info(&epf_nvme->epf->dev,
+				dev_err(&epf_nvme->epf->dev,
 				 	 "Error allocating memory\n");
 				break;
 			}
@@ -1813,18 +1899,18 @@ static void pci_epf_nvme_exec_kv_cmd(struct pci_epf_nvme_cmd *epcmd)
 			}
 			readdir_data.ctx.actor = __dir_print_actor;
 			ret = iterate_dir(fp, &readdir_data.ctx);
-			dev_info(&epf_nvme->epf->dev,
+			dev_dbg(&epf_nvme->epf->dev,
 				 "Number of keys: %d Found: %d Dirent_count: %d\n",
 				 readdir_data.number_of_keys, readdir_data.found,
 				 readdir_data.dirent_count);
 			memcpy(readdir_data.buffer_of_keys,
 			       &readdir_data.number_of_keys, sizeof(u32));
 			epcmd->buffer = readdir_data.buffer_of_keys;
-			DumpHex(readdir_data.buffer_of_keys,
-				readdir_data.buffer_of_keys_len, epcmd);
+			/*DumpHex(readdir_data.buffer_of_keys,
+				readdir_data.buffer_of_keys_len, epcmd);*/
 			__putname(buf);
 			filp_close(fp, NULL);
-			dev_info(&epf_nvme->epf->dev,
+			dev_dbg(&epf_nvme->epf->dev,
 				 "List successfully done\n");
 			break;
 		default:
@@ -1867,13 +1953,16 @@ static void pci_epf_nvme_exec_cmd(struct pci_epf_nvme_cmd *epcmd,
 				return;
 		}
 	}
-	dev_info(&epf_nvme->epf->dev,
+	dev_dbg(&epf_nvme->epf->dev,
 				 "NSID: %d\n", cmd->common.nsid);
 	/* Synchronously execute the command */
 	ret = __nvme_submit_sync_cmd(q, cmd, &epcmd->cqe.result,
 				     epcmd->buffer, epcmd->buffer_size,
 				     NVME_QID_ANY, 0);
-	dev_info(&epf_nvme->epf->dev,
+	if(cmd->identify.cns == NVME_ID_CNS_NS_CS_INDEP) {
+		ret = 0;
+	}
+	dev_dbg(&epf_nvme->epf->dev,
 				 "RET: %d\n", ret);
 	if (ret < 0)
                 epcmd->status = NVME_SC_INTERNAL | NVME_SC_DNR;
@@ -2273,7 +2362,7 @@ static void pci_epf_nvme_disable_ctrl(struct pci_epf_nvme *epf_nvme)
 	if (!epf_nvme->ctrl_enabled)
 		return;
 
-	dev_info(&epf->dev, "Disabling controller\n");
+	dev_dbg(&epf->dev, "Disabling controller\n");
 
 	/*
 	 * Unmap the submission queues first to release all references
@@ -2308,7 +2397,7 @@ static void pci_epf_nvme_delete_ctrl(struct pci_epf *epf)
 	struct pci_epf_nvme *epf_nvme = epf_get_drvdata(epf);
 	struct pci_epf_nvme_ctrl *ctrl = &epf_nvme->ctrl;
 
-	dev_info(&epf->dev, "Deleting controller\n");
+	dev_dbg(&epf->dev, "Deleting controller\n");
 
 	if (ctrl->ctrl) {
 		nvme_put_ctrl(ctrl->ctrl);
@@ -2374,25 +2463,25 @@ static int pci_epf_nvme_create_ctrl(struct pci_epf *epf)
 		goto out_delete_ctrl;
 	}
 
-	dev_info(&epf->dev, "NVMe fabrics controller created, %u I/O queues\n",
+	dev_dbg(&epf->dev, "NVMe fabrics controller created, %u I/O queues\n",
 		 fctrl->queue_count - 1);
 
 	epf_nvme->queue_count = epf_nvme->qid_max + 1;
 	if (features->msix_capable && epf->msix_interrupts) {
-		dev_info(&epf->dev,
+		dev_dbg(&epf->dev,
 			 "NVMe PCI controller supports MSIX, %u vectors\n",
 			 epf->msix_interrupts);
 		epf_nvme->queue_count =
 			min(epf_nvme->queue_count, epf->msix_interrupts);
 	} else if (features->msi_capable && epf->msi_interrupts) {
-		dev_info(&epf->dev,
+		dev_dbg(&epf->dev,
 			 "NVMe PCI controller supports MSI, %u vectors\n",
 			 epf->msi_interrupts);
 		epf_nvme->queue_count =
 			min(epf_nvme->queue_count, epf->msi_interrupts);
 	}
 
-	dev_info(&epf->dev, "NVMe PCI controller: %u I/O queues\n",
+	dev_dbg(&epf->dev, "NVMe PCI controller: %u I/O queues\n",
 		 epf_nvme->queue_count - 1);
 
 	/* Allocate queues */
@@ -2485,7 +2574,7 @@ static void pci_epf_nvme_enable_ctrl(struct pci_epf_nvme *epf_nvme)
 	struct pci_epf *epf = epf_nvme->epf;
 	int ret;
 
-	dev_info(&epf->dev, "Enabling controller\n");
+	dev_dbg(&epf->dev, "Enabling controller\n");
 
 	ctrl->mdts = epf_nvme->mdts_kb * SZ_1K;
 
@@ -2736,7 +2825,7 @@ static void pci_epf_nvme_identify_hook(struct pci_epf_nvme_cmd *epcmd)
 				break;
 			}
 
-			/* This will find the CSI NIDT and fill it s*/
+			/* This will find the CSI NIDT and fill it*/
 			len = nvme_process_ns_desc(epf_nvme, cur);
 			if (len < 0)
 				break;
@@ -2744,6 +2833,14 @@ static void pci_epf_nvme_identify_hook(struct pci_epf_nvme_cmd *epcmd)
 			len += sizeof(*cur);
 		}
 		//DumpHex(epcmd->buffer, epcmd->buffer_size, epcmd);
+		return;
+	} else if (cmd->identify.cns == NVME_ID_CNS_NS_CS_INDEP) {
+		 memset(epcmd->buffer, 0, epcmd->buffer_size);
+		//For the moment the only namespace we use is nsid = 1
+		if(cmd->common.nsid == 1) {
+			((struct namespace_data_structure_0x08 *)epcmd->buffer)
+				->NRDY = 1;
+		}
 		return;
 	}
 
@@ -2794,6 +2891,56 @@ static void pci_epf_nvme_identify_hook(struct pci_epf_nvme_cmd *epcmd)
 
 	/* Set power state info */
 	id->psd[0].max_power = cpu_to_le16(700); /* centiwatts */
+}
+
+static void pci_epf_nvme_get_log_kv_hook(struct pci_epf_nvme_cmd *epcmd)
+{
+	struct nvme_command *cmd = &epcmd->cmd;
+	struct nvme_effects_log *log = epcmd->buffer;
+	u32 val;
+
+	if (cmd->get_log_page.lid != NVME_LOG_CMD_EFFECTS)
+		return;
+
+	/*
+	 * ACS0     [Delete I/O Submission Queue     ] 00000001
+	 * CSUPP+  LBCC-  NCC-  NIC-  CCC-  USS-  No command restriction
+	 */
+	log->acs[0] |= cpu_to_le32(NVME_CMD_EFFECTS_CSUPP);
+
+	/*
+	 * ACS1     [Create I/O Submission Queue     ] 00000001
+	 * CSUPP+  LBCC-  NCC-  NIC-  CCC-  USS-  No command restriction
+	 */
+	log->acs[1] |= cpu_to_le32(NVME_CMD_EFFECTS_CSUPP);
+
+	/*
+	 * ACS4     [Delete I/O Completion Queue     ] 00000001
+	 * CSUPP+  LBCC-  NCC-  NIC-  CCC-  USS-  No command restriction
+	 */
+	log->acs[4] |= cpu_to_le32(NVME_CMD_EFFECTS_CSUPP);
+
+	/*
+	 * ACS5     [Create I/O Completion Queue     ] 00000001
+	 * CSUPP+  LBCC-  NCC-  NIC-  CCC-  USS-  No command restriction
+	 */
+	log->acs[5] |= cpu_to_le32(NVME_CMD_EFFECTS_CSUPP);
+
+
+	log->iocs[8] = 0;
+	log->iocs[9] = 0;
+
+	val = 0;
+	val |= NVME_CMD_EFFECTS_CSUPP;
+	log->iocs[16] = cpu_to_le32(val);
+
+	val = 0;
+	val |= NVME_CMD_EFFECTS_CSUPP;
+	log->iocs[20] = cpu_to_le32(val);
+
+	val = 0;
+	val |= NVME_CMD_EFFECTS_CSUPP;
+	log->iocs[6] = cpu_to_le32(val);
 }
 
 static void pci_epf_nvme_get_log_hook(struct pci_epf_nvme_cmd *epcmd)
@@ -2856,7 +3003,7 @@ static bool pci_epf_nvme_process_set_features(struct pci_epf_nvme_cmd *epcmd)
 		return true;
 	} else if (feat == NVME_KV_KEY_VALUE_CONFIG) {
 		ednek = epcmd->cmd.common.cdw11 & BIT(0);
-		dev_info(&epf_nvme->epf->dev,
+		dev_dbg(&epf_nvme->epf->dev,
 			 "EDNEK = %d\n",
 			  ednek);
 		epcmd->status = NVME_SC_SUCCESS;
@@ -2870,14 +3017,11 @@ static void pci_epf_nvme_process_admin_cmd(struct pci_epf_nvme_cmd *epcmd)
 	struct pci_epf_nvme *epf_nvme = epcmd->epf_nvme;
 	void (*post_exec_hook)(struct pci_epf_nvme_cmd *) = NULL;
 	struct nvme_command *cmd = &epcmd->cmd;
+	struct pci_epf_nvme_ctrl *ctrl = &epf_nvme->ctrl;
 	int ret;
 	struct KVF kvf0 = {0};
-	/*epcmd->ns = nvme_find_get_ns(epf_nvme->ctrl.ctrl,
-				     le32_to_cpu(epcmd->cmd.common.nsid));
-	if (!epcmd->ns) {
-		epcmd->status = NVME_SC_INVALID_NS | NVME_SC_DNR;
-		goto complete;
-	}*/
+	u64 command_set_vector = 0;
+	
 	switch (cmd->common.opcode) {
 	case nvme_admin_identify:
 		post_exec_hook = pci_epf_nvme_identify_hook;
@@ -2886,11 +3030,9 @@ static void pci_epf_nvme_process_admin_cmd(struct pci_epf_nvme_cmd *epcmd)
 			pci_epf_nvme_cmd_name(epcmd), cmd->identify.cns);
 		epcmd->buffer_size = NVME_IDENTIFY_DATA_SIZE;
 		epcmd->dma_dir = DMA_TO_DEVICE;
-		//THIS HAS TO BE DELETED
-		if(cmd->identify.csi == 0x01) {
-			KV = 1;
-		}
-		if (cmd->identify.cns == 0x05 && cmd->identify.csi == 0x01) {
+
+		if (cmd->identify.cns == 0x05 && 
+		    cmd->identify.csi == NVME_CSI_KV) {
 			/* Setup the command buffer */
 			ret = pci_epf_nvme_cmd_parse_dptr(epcmd);
 			if (ret)
@@ -2901,6 +3043,8 @@ static void pci_epf_nvme_process_admin_cmd(struct pci_epf_nvme_cmd *epcmd)
 					= DISK_SPACE - actual_size;
 			((struct namespace_data_structure *)epcmd->buffer)->NKVF
 					= 1;
+			
+
 			/*memcpy(((struct namespace_data_structure *)
 				epcmd->buffer)->NGUID,
 				epcmd->ns->head->ids.nguid,
@@ -2916,18 +3060,77 @@ static void pci_epf_nvme_process_admin_cmd(struct pci_epf_nvme_cmd *epcmd)
 			pci_epf_nvme_transfer_cmd_data(epcmd);
 			goto complete;
 		} else if (cmd->identify.cns == 0x06 &&
-			   cmd->identify.csi == 0x01)  {
+			   cmd->identify.csi == NVME_CSI_KV)  {
 			ret = pci_epf_nvme_cmd_parse_dptr(epcmd);
 			if (ret)
 				return;
 			memset(epcmd->buffer, 0, epcmd->buffer_size);
+			((struct namespace_data_structure_0x06 *)epcmd->buffer)
+				->version = 0x110;
 			pci_epf_nvme_transfer_cmd_data(epcmd);
 			goto complete;
-		}
+		} else if (cmd->identify.cns == 0x1c && 
+			   ctrl->cap & NVME_IO_COMMAND_SET_SUPPORT_BIT)  {
+			ret = pci_epf_nvme_cmd_parse_dptr(epcmd);
+			if (ret)
+				return;
+			memset(epcmd->buffer, 0, epcmd->buffer_size);
+
+			//NVM Command Set
+			command_set_vector |= BIT(0);
+			memcpy(epcmd->buffer, &command_set_vector, 
+			       sizeof(command_set_vector));
+			
+			//KV Command Set
+			command_set_vector = 0;
+			command_set_vector |= BIT(1);
+			memcpy(epcmd->buffer + sizeof(command_set_vector), 
+			       &command_set_vector, 
+			       sizeof(command_set_vector));
+			
+			pci_epf_nvme_transfer_cmd_data(epcmd);
+			goto complete;
+		} else if (cmd->identify.cns == 0x0A &&
+			   cmd->identify.csi == NVME_CSI_KV)  {
+				ret = pci_epf_nvme_cmd_parse_dptr(epcmd);
+				if (ret)
+					return;
+				memset(epcmd->buffer, 0, epcmd->buffer_size);
+				if(cmd->identify.rsvd11[0] == 0) {
+					((struct namespace_data_structure *)
+					epcmd->buffer)->NKVF = 1;
+					kvf0.KV_key_max_length = 
+						KV_KEY_MAX_LENGTH;
+					kvf0.KV_value_max_length = 
+						MAX_NUM_VALUE_SIZE;
+					((struct namespace_data_structure *)
+						epcmd->buffer)->KVF0 = kvf0;
+				}
+				pci_epf_nvme_transfer_cmd_data(epcmd);
+				goto complete;
+			}
 		break;
 
 	case nvme_admin_get_log_page:
-		post_exec_hook = pci_epf_nvme_get_log_hook;
+		u32 css;
+		epf_nvme->ctrl.cc = pci_epf_nvme_reg_read32(&epf_nvme->ctrl, NVME_REG_CC);
+		css = (epf_nvme->ctrl.cc & NVME_CC_CSS_MASK) >> NVME_CC_CSS_SHIFT;
+
+		dev_dbg(&epf_nvme->epf->dev, "Log ID: %d\n", cmd->get_log_page.lid);
+		dev_dbg(&epf_nvme->epf->dev, "CC.CSS: %#05x\n", css);
+		dev_dbg(&epf_nvme->epf->dev, "CDW14: %d\n", cmd->common.cdw14);
+		dev_dbg(&epf_nvme->epf->dev, "CSI: %d\n", epcmd->cmd.get_log_page.csi);
+		
+		if (epcmd->cmd.get_log_page.csi == NVME_CSI_ZNS) {
+			dev_dbg(&epf_nvme->epf->dev, "ZNS NOT SUPORTED\n");
+		}
+		if (epcmd->cmd.get_log_page.csi == NVME_CSI_KV) {
+			// set csi to 0
+			cmd->common.cdw14 &= CSI_MASK;
+			post_exec_hook = pci_epf_nvme_get_log_kv_hook;
+		} else {
+			post_exec_hook = pci_epf_nvme_get_log_hook;
+		}
 		epcmd->buffer_size = nvme_get_log_page_len(cmd);
 		epcmd->dma_dir = DMA_TO_DEVICE;
 		break;
@@ -2948,8 +3151,42 @@ static void pci_epf_nvme_process_admin_cmd(struct pci_epf_nvme_cmd *epcmd)
 		dev_dbg(&epf_nvme->epf->dev,
 			"Command %s, FID : %#08x\n",
 			pci_epf_nvme_cmd_name(epcmd), cmd->features.fid);
-		if (pci_epf_nvme_process_set_features(epcmd))
-			goto complete;
+		if(cmd->features.fid == COMMAND_SET_PROFILE) {
+			if( ctrl->cap & NVME_IO_COMMAND_SET_SUPPORT_BIT) {
+				//if cc.css = 110
+				if (!(ctrl->cc & 
+				     NVME_CONTROLLER_CONFIGURATION_BIT4) &&
+				     (ctrl->cc & 
+				     NVME_CONTROLLER_CONFIGURATION_BIT5) &&
+				     (ctrl->cc & 
+				     NVME_CONTROLLER_CONFIGURATION_BIT6)) {
+					/*we keep the 8 lower bits which is the 
+					  IOCSCI*/
+					cmd->features.dword11 &= 
+							LOWER_BITS_MASK;
+					if(cmd->features.dword11 == 0) {
+						KV = 0;
+						dev_dbg(&epf_nvme->epf->dev, 
+						"KV Changed, Now KV = %d\n",
+						KV);
+					}
+					else if  (cmd->features.dword11 == 1) {
+						KV = 1;
+						dev_dbg(&epf_nvme->epf->dev, 
+						"KV Changed, Now KV = %d\n",
+						KV);
+					}
+					else {
+						epcmd->status = 
+						IO_COMMAND_COMBINATION_REJECTED;
+					}
+				} else {
+					epcmd->status = NVME_SC_SUCCESS;
+				}
+			}
+		}
+		pci_epf_nvme_process_set_features(epcmd);
+		goto complete;
 		break;
 	case nvme_admin_get_features:
 		dev_dbg(&epf_nvme->epf->dev,
@@ -3321,7 +3558,7 @@ static int pci_epf_nvme_link_up(struct pci_epf *epf)
 {
 	struct pci_epf_nvme *epf_nvme = epf_get_drvdata(epf);
 
-	dev_info(&epf->dev, "Link UP\n");
+	dev_dbg(&epf->dev, "Link UP\n");
 
 	pci_epf_nvme_init_ctrl_regs(epf);
 
@@ -3341,8 +3578,8 @@ static int pci_epf_nvme_link_down(struct pci_epf *epf)
 	kernel_write(kv_file, &actual_size, sizeof(actual_size), 0);
 	filp_close(kv_file, NULL);
 
-	pr_info("\t---- ACTUAL SIZE %zu ---- \n", actual_size);
-	dev_info(&epf->dev, "Link DOWN\n");
+	dev_dbg(&epf->dev, "\t---- ACTUAL SIZE %zu ---- \n", actual_size);
+	dev_dbg(&epf->dev, "Link DOWN\n");
 
 	/* Stop polling BAR registers and disable the controller */
 	cancel_delayed_work(&epf_nvme->reg_poll);
@@ -3384,14 +3621,14 @@ static int pci_epf_nvme_bind(struct pci_epf *epf)
 	if (epf_nvme->dma_enable) {
 		dma_supported = pci_epf_nvme_init_dma(epf_nvme);
 		if (dma_supported) {
-			dev_info(&epf->dev, "DMA supported\n");
+			dev_dbg(&epf->dev, "DMA supported\n");
 		} else {
-			dev_info(&epf->dev,
+			dev_dbg(&epf->dev,
 				 "DMA not supported, falling back to mmio\n");
 			epf_nvme->dma_enable = false;
 		}
 	} else {
-		dev_info(&epf->dev, "DMA disabled\n");
+		dev_dbg(&epf->dev, "DMA disabled\n");
 	}
 
 	/* Create the fabrics host controller */
@@ -3668,7 +3905,7 @@ static struct pci_epf_driver epf_nvme_driver = {
 static int __init pci_epf_nvme_init(void)
 {
 	int ret;
-	KV = 0;
+	KV = 1;
 	ednek = 0;
 	if (file_doesnt_exist(DISK_ACTUAL_SIZE_PATH)) {
 		//file doesn't exist actual size is disk space
