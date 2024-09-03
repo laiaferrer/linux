@@ -277,7 +277,7 @@ struct namespace_data_structure_0x06 {
 struct namespace_data_structure {
 	u64	NSZE;			//mandatory
 	u64	rsvd1;
-	u64	NUSE;		//mandatory
+	u64	NUSE;			//mandatory
 
 	union {
 		u8 NSFEAT;		//mandatory
@@ -288,7 +288,7 @@ struct namespace_data_structure {
 			u8 resvd2 : 4;
 		} __packed;
 	};
-	u8	NKVF;		//mandatory
+	u8	NKVF;			//mandatory
 	union {
 		u8 NMIC;
 		struct
@@ -947,7 +947,8 @@ static int pci_epf_nvme_alloc_cmd_segs(struct pci_epf_nvme_cmd *epcmd,
 	}
 
 	/* More than one segment needed: allocate an array */
-	segs = kcalloc(nr_segs, sizeof(struct pci_epf_nvme_segment), GFP_KERNEL);
+	segs = kcalloc(nr_segs, sizeof(struct pci_epf_nvme_segment), 
+		       GFP_KERNEL);
 	if (!segs)
 		return -ENOMEM;
 
@@ -1210,7 +1211,8 @@ static int pci_epf_nvme_cmd_parse_prp_list(struct pci_epf_nvme *epf_nvme,
 			nr_segs++;
 			if (WARN_ON_ONCE(nr_segs > epcmd->nr_segs)) {
 				dev_err(&epf_nvme->epf->dev,
-					"Number of required segments is bigger than %d, size : %zu\n",
+					"Number of required segments is bigger "
+					"than %d, size : %zu\n",
 					epcmd->nr_segs, size);
 				goto internal;
 			}
@@ -1900,9 +1902,10 @@ static void pci_epf_nvme_exec_kv_cmd(struct pci_epf_nvme_cmd *epcmd)
 			readdir_data.ctx.actor = __dir_print_actor;
 			ret = iterate_dir(fp, &readdir_data.ctx);
 			dev_dbg(&epf_nvme->epf->dev,
-				 "Number of keys: %d Found: %d Dirent_count: %d\n",
-				 readdir_data.number_of_keys, readdir_data.found,
-				 readdir_data.dirent_count);
+				 "Number of keys: %d Found: %d "
+				 "Dirent_count: %d\n",
+				 readdir_data.number_of_keys, 
+				 readdir_data.found, readdir_data.dirent_count);
 			memcpy(readdir_data.buffer_of_keys,
 			       &readdir_data.number_of_keys, sizeof(u32));
 			epcmd->buffer = readdir_data.buffer_of_keys;
@@ -1971,7 +1974,8 @@ static void pci_epf_nvme_exec_cmd(struct pci_epf_nvme_cmd *epcmd,
 
 	if (epcmd->status != NVME_SC_SUCCESS) {
 		dev_err(&epf_nvme->epf->dev,
-			"QID %d: submit command %s (0x%x) failed, status 0x%0x\n",
+			"QID %d: submit command %s (0x%x) failed, "
+			"status 0x%0x\n",
 			epcmd->sqid, pci_epf_nvme_cmd_name(epcmd),
 			epcmd->cmd.common.opcode, epcmd->status);
 		return;
@@ -2003,7 +2007,8 @@ static void pci_epf_nvme_io_cmd_work(struct work_struct *work)
 			break;
 
 		case nvme_cmd_dsm:
-			epcmd->buffer_size = (le32_to_cpu(epcmd->cmd.dsm.nr) + 1) *
+			epcmd->buffer_size = 
+				(le32_to_cpu(epcmd->cmd.dsm.nr) + 1) *
 				sizeof(struct nvme_dsm_range);
 			epcmd->dma_dir = DMA_FROM_DEVICE;
 			goto complete;
@@ -2659,7 +2664,8 @@ static void pci_epf_nvme_create_cq(struct pci_epf_nvme *epf_nvme,
 	if (!qsize || qsize > NVME_CAP_MQES(epf_nvme->ctrl.cap)) {
 		if (qsize > mqes)
 			dev_warn(&epf_nvme->epf->dev,
-				 "Create CQ %d, qsize %d > mqes %d: buggy driver?\n",
+				 "Create CQ %d, qsize %d > mqes %d: buggy "
+				 "driver?\n",
 				 cqid, (int)qsize, mqes);
 		epcmd->status = NVME_SC_QUEUE_SIZE | NVME_SC_DNR;
 		return;
@@ -2865,7 +2871,8 @@ static void pci_epf_nvme_identify_hook(struct pci_epf_nvme_cmd *epcmd)
 	/* Indicate no support for SGLs */
 	id->sgls = 0;
 
-	/* Implementations before 1.4 may report a value of 0h (Fig. 276 Base Specs)*/
+	/* Implementations before 1.4 may report a value of 0h 
+	(Fig. 276 Base Specs)*/
 	if (((id->ver && GENMASK(31, 16)) >> 16) < cpu_to_le16(2)) {
 		if (((id->ver && GENMASK(15, 8)) >> 8) < 4 ) {
 			id->cntrltype = 0;
@@ -2993,7 +3000,7 @@ static bool pci_epf_nvme_process_set_features(struct pci_epf_nvme_cmd *epcmd)
 		}
 
 		epcmd->cqe.result.u32 = cpu_to_le32((epf_nvme->qid_max - 1) |
-						((epf_nvme->qid_max - 1) << 16));
+					((epf_nvme->qid_max - 1) << 16));
 		return true;
 	} else if (feat == NVME_FEAT_IRQ_COALESCE) {
 		epcmd->status = NVME_SC_SUCCESS;
@@ -3044,7 +3051,6 @@ static void pci_epf_nvme_process_admin_cmd(struct pci_epf_nvme_cmd *epcmd)
 			((struct namespace_data_structure *)epcmd->buffer)->NKVF
 					= 1;
 			
-
 			/*memcpy(((struct namespace_data_structure *)
 				epcmd->buffer)->NGUID,
 				epcmd->ns->head->ids.nguid,
@@ -3053,6 +3059,7 @@ static void pci_epf_nvme_process_admin_cmd(struct pci_epf_nvme_cmd *epcmd)
 				epcmd->buffer)->EUI64,
 				epcmd->ns->head->ids.eui64,
 				sizeof(epcmd->ns->head->ids.eui64));*/
+
 			kvf0.KV_key_max_length = KV_KEY_MAX_LENGTH;
 			kvf0.KV_value_max_length = MAX_NUM_VALUE_SIZE;
 			((struct namespace_data_structure *)epcmd->buffer)->KVF0
@@ -3113,13 +3120,17 @@ static void pci_epf_nvme_process_admin_cmd(struct pci_epf_nvme_cmd *epcmd)
 
 	case nvme_admin_get_log_page:
 		u32 css;
-		epf_nvme->ctrl.cc = pci_epf_nvme_reg_read32(&epf_nvme->ctrl, NVME_REG_CC);
-		css = (epf_nvme->ctrl.cc & NVME_CC_CSS_MASK) >> NVME_CC_CSS_SHIFT;
+		epf_nvme->ctrl.cc = pci_epf_nvme_reg_read32(&epf_nvme->ctrl, 
+				      			    NVME_REG_CC);
+		css = (epf_nvme->ctrl.cc & NVME_CC_CSS_MASK) >> 
+		       NVME_CC_CSS_SHIFT;
 
-		dev_dbg(&epf_nvme->epf->dev, "Log ID: %d\n", cmd->get_log_page.lid);
+		dev_dbg(&epf_nvme->epf->dev, "Log ID: %d\n", 
+			cmd->get_log_page.lid);
 		dev_dbg(&epf_nvme->epf->dev, "CC.CSS: %#05x\n", css);
 		dev_dbg(&epf_nvme->epf->dev, "CDW14: %d\n", cmd->common.cdw14);
-		dev_dbg(&epf_nvme->epf->dev, "CSI: %d\n", epcmd->cmd.get_log_page.csi);
+		dev_dbg(&epf_nvme->epf->dev, "CSI: %d\n", 
+			epcmd->cmd.get_log_page.csi);
 		
 		if (epcmd->cmd.get_log_page.csi == NVME_CSI_ZNS) {
 			dev_dbg(&epf_nvme->epf->dev, "ZNS NOT SUPORTED\n");
@@ -3387,7 +3398,8 @@ static int pci_epf_nvme_alloc_reg_bar(struct pci_epf *epf)
 	if (features->bar_fixed_size[reg_bar]) {
 		if (reg_bar_size > features->bar_fixed_size[reg_bar]) {
 			dev_err(&epf->dev,
-				"Reg BAR %d size %llu B too small, need %zu B\n",
+				"Reg BAR %d size %llu B too small, "
+				"need %zu B\n",
 				reg_bar,
 				features->bar_fixed_size[reg_bar],
 				reg_bar_size);
