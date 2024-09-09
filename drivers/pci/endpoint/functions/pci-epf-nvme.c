@@ -7,6 +7,8 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 #define DMA_TIMEOUT_MS 5000
+#define STATS_BUFFER_SIZE (sizeof(struct pci_epf_nvme_timestamps) * PCI_EPF_NVME_MAX_STATS)
+#define PCI_EPF_NVME_MAX_STATS 1000
 
 #include <linux/delay.h>
 #include <linux/dmaengine.h>
@@ -20,6 +22,8 @@
 #include <linux/io-64-nonatomic-lo-hi.h>
 #include <linux/nvme.h>
 #include <generated/utsrelease.h>
+#include <linux/ktime.h>
+#include <linux/timekeeping.h>
 
 
 #include "../drivers/nvme/host/nvme.h"
@@ -413,6 +417,7 @@ int KV;
  * path of the file where the free space is stored
  */
 #define DISK_ACTUAL_SIZE_PATH "/kv_metadata/actual_size"
+#define DISK_TIMES_PATH "/kv_metadata/times"
 
 #define NVME_CSI_KV 0x01
 #define NVME_CSI_NVM_COMMAND_SET 0x00
@@ -507,6 +512,31 @@ struct pci_epf_nvme_ctrl {
 };
 
 /*
+ * Struct to measure the diferent time spend in each important part of the code
+ */
+struct pci_epf_nvme_timestamps {
+	u64				creation;
+	u64				prp_start;
+	u64				prp_end;
+	u64 				setup_buffer_start;
+	u64 				setup_buffer_end;
+	u64 				handle_data_start;
+	u64 				handle_data_end;
+	u64				key_conersion_start;
+	u64				key_conersion_end;
+	u64				command_handle_start;
+	u64				command_handle_end;
+	u64				completion_start;
+	u64				completion;
+};
+
+static unsigned collected_read_stats = 0;
+static unsigned collected_write_stats = 0;
+static struct pci_epf_nvme_timestamps *read_stats = NULL;
+static struct pci_epf_nvme_timestamps *write_stats = NULL;
+
+
+/*
  * Descriptor for commands sent by the host. This is also used internally for
  * fabrics commands to control our fabrics target.
  */
@@ -536,6 +566,7 @@ struct pci_epf_nvme_cmd {
 	struct pci_epf_nvme_segment	*segs;
 
 	struct work_struct		io_work;
+	struct pci_epf_nvme_timestamps	ts;
 };
 
 /*
@@ -915,6 +946,7 @@ static void pci_epf_nvme_init_cmd(struct pci_epf_nvme *epf_nvme,
 	epcmd->cqid = cqid;
 	epcmd->status = NVME_SC_SUCCESS;
 	epcmd->dma_dir = DMA_NONE;
+	epcmd->ts.creation = ktime_get_ns();
 }
 
 static int pci_epf_nvme_alloc_cmd_buffer(struct pci_epf_nvme_cmd *epcmd)
@@ -957,6 +989,7 @@ static int pci_epf_nvme_alloc_cmd_segs(struct pci_epf_nvme_cmd *epcmd,
 
 	return 0;
 }
+
 
 static void pci_epf_nvme_free_cmd(struct pci_epf_nvme_cmd *epcmd)
 {
@@ -1326,6 +1359,7 @@ static int pci_epf_nvme_cmd_parse_dptr(struct pci_epf_nvme_cmd *epcmd)
 	if (epcmd->cmd.common.flags & NVME_CMD_SGL_ALL)
 		goto invalid_field;
 
+	epcmd->ts.prp_start = ktime_get_ns();
 	/* Get pci segments for the command using its prps */
 	ofst = pci_epf_nvme_prp_ofst(ctrl, prp1);
 	if (ofst & 0x3)
@@ -1335,11 +1369,14 @@ static int pci_epf_nvme_cmd_parse_dptr(struct pci_epf_nvme_cmd *epcmd)
 		ret = pci_epf_nvme_cmd_parse_prp_simple(epf_nvme, epcmd);
 	else
 		ret = pci_epf_nvme_cmd_parse_prp_list(epf_nvme, epcmd);
+	epcmd->ts.prp_end =ktime_get_ns();
 	if (ret)
 		return ret;
 
 	/* Get an internal buffer for the command */
+	epcmd->ts.setup_buffer_start = ktime_get_ns();
 	ret = pci_epf_nvme_alloc_cmd_buffer(epcmd);
+	epcmd->ts.setup_buffer_end = ktime_get_ns();
 	if (ret) {
 		epcmd->status = NVME_SC_INTERNAL | NVME_SC_DNR;
 		return ret;
@@ -1555,6 +1592,8 @@ static void pci_epf_nvme_exec_kv_cmd(struct pci_epf_nvme_cmd *epcmd)
 	/* Transfer size is value size (cdw10) */
 	epcmd->buffer_size = cmd->cdw10;
 
+
+
 	if (epcmd->buffer_size) {
 		/* Setup the command buffer */
 		ret = pci_epf_nvme_cmd_parse_dptr(epcmd);
@@ -1563,7 +1602,9 @@ static void pci_epf_nvme_exec_kv_cmd(struct pci_epf_nvme_cmd *epcmd)
 
 		/* Get data from the host if needed */
 		if (epcmd->dma_dir == DMA_FROM_DEVICE) {
+			epcmd->ts.handle_data_start = ktime_get_ns();
 			ret = pci_epf_nvme_transfer_cmd_data(epcmd);
+			epcmd->ts.handle_data_end = ktime_get_ns();
 			if (ret)
 				return;
 		}
@@ -1572,7 +1613,7 @@ static void pci_epf_nvme_exec_kv_cmd(struct pci_epf_nvme_cmd *epcmd)
 	dev_dbg(&epf_nvme->epf->dev,
 		 "KV Command %s\n", pci_epf_nvme_kv_cmd_name(epcmd));
 
-
+	epcmd->ts.key_conersion_start = ktime_get_ns();
 	if (epcmd->cmd.common.opcode == nvme_cmd_kv_store ||
 	    epcmd->cmd.common.opcode == nvme_cmd_kv_retrieve ||
 	    epcmd->cmd.common.opcode == nvme_cmd_kv_exist ||
@@ -1602,7 +1643,8 @@ static void pci_epf_nvme_exec_kv_cmd(struct pci_epf_nvme_cmd *epcmd)
 		 	 "Key length: %d Key value: %s\n", key_length,
 			 kv_path);
 	}
-
+	epcmd->ts.key_conersion_end = ktime_get_ns();
+	epcmd->ts.command_handle_start = ktime_get_ns();
 	switch (cmd->opcode) {
 		case nvme_cmd_kv_store:
 			struct nvme_kv_store_command *store_cmd =
@@ -1925,6 +1967,8 @@ static void pci_epf_nvme_exec_kv_cmd(struct pci_epf_nvme_cmd *epcmd)
 
 	}
 
+	epcmd->ts.command_handle_end = ktime_get_ns();
+	
 	/* If needed transfer data to host (e.g., KV retrieve or list) */
 	if (epcmd->buffer_size && epcmd->dma_dir == DMA_TO_DEVICE)
 		pci_epf_nvme_transfer_cmd_data(epcmd);
@@ -1994,6 +2038,26 @@ static inline size_t pci_epf_nvme_rw_data_len(struct pci_epf_nvme_cmd *epcmd)
 		epcmd->ns->head->lba_shift;
 }
 
+static void pci_epf_nvme_collect_statistics(struct pci_epf_nvme_cmd *epcmd)
+{
+	if (!epcmd->sqid) /* Ignore admin commands */
+		return;
+
+	if (epcmd->cmd.common.opcode == nvme_cmd_kv_store) {
+		if (collected_read_stats >= PCI_EPF_NVME_MAX_STATS)
+			return;
+		memcpy(&write_stats[collected_write_stats++], &epcmd->ts,
+		       sizeof(epcmd->ts));
+	}
+
+	if (epcmd->cmd.common.opcode == nvme_cmd_kv_retrieve) {
+		if (collected_write_stats >= PCI_EPF_NVME_MAX_STATS)
+			return;
+		memcpy(&read_stats[collected_read_stats++], &epcmd->ts,
+		       sizeof(epcmd->ts));
+	}
+}
+
 static void pci_epf_nvme_io_cmd_work(struct work_struct *work)
 {
 	struct pci_epf_nvme_cmd *epcmd =
@@ -2030,7 +2094,11 @@ static void pci_epf_nvme_io_cmd_work(struct work_struct *work)
 		pci_epf_nvme_exec_kv_cmd(epcmd);
 
 complete:
+	epcmd->ts.completion_start = ktime_get_ns();
 	pci_epf_nvme_complete_cmd(epcmd);
+	epcmd->ts.completion = ktime_get_ns();
+	pci_epf_nvme_collect_statistics(epcmd);
+	
 }
 
 static bool pci_epf_nvme_queue_response(struct pci_epf_nvme_cmd *epcmd)
@@ -2363,6 +2431,63 @@ static void pci_epf_nvme_disable_ctrl(struct pci_epf_nvme *epf_nvme)
 	struct pci_epf_nvme_ctrl *ctrl = &epf_nvme->ctrl;
 	struct pci_epf *epf = epf_nvme->epf;
 	int qid;
+
+	struct file *kv_file = NULL;
+	//file where the actual size will be saved
+	kv_file = filp_open(DISK_ACTUAL_SIZE_PATH, O_RDWR | O_CREAT, 0666);
+	kernel_write(kv_file, &actual_size, sizeof(actual_size), 0);
+	filp_close(kv_file, NULL);
+
+	kv_file = filp_open(DISK_TIMES_PATH, O_RDWR | O_CREAT, 0666);
+
+	u64 start_creation = 0;
+	u64 prps = 0;
+	u64 setup_buffer = 0;
+	u64 key_conversion = 0;
+	u64 command_handle = 0;
+	u64 completition_time = 0;
+	u64 hole_command = 0;
+	int ret = 0;
+	char buffer[64]; 
+	loff_t offset = 0;
+	
+	for (int i = 0; i < collected_write_stats; ++i) {
+		start_creation += (write_stats[i].prp_start - write_stats[i].creation);
+		prps += (write_stats[i].prp_end -write_stats[i].prp_start);
+		setup_buffer += (write_stats[i].setup_buffer_end -write_stats[i].setup_buffer_start);
+		key_conversion += (write_stats[i].key_conersion_end - write_stats[i].key_conersion_start);
+		command_handle += (write_stats[i].command_handle_end - write_stats[i].command_handle_start);
+		completition_time += (write_stats[i].completion - write_stats[i].completion_start);
+		hole_command += (write_stats[i].completion - write_stats[i].creation);
+	}
+
+	int len = snprintf(buffer, sizeof(buffer), "Start_creation: %llu\n", (start_creation/collected_write_stats));
+	ret = kernel_write(kv_file, buffer, len, &offset);
+	offset += 64;
+	len = snprintf(buffer, sizeof(buffer), "PRPs: %llu\n", (prps/collected_write_stats));
+	ret = kernel_write(kv_file, buffer, len, &offset);
+	offset += 64;
+	len = snprintf(buffer, sizeof(buffer), "setup_buffer: %llu\n", (setup_buffer/collected_write_stats));
+	ret = kernel_write(kv_file, buffer, len, &offset);
+	offset += 64;
+	len = snprintf(buffer, sizeof(buffer), "Key Conversion: %llu\n", (key_conversion/collected_write_stats));
+	ret = kernel_write(kv_file, buffer, len, &offset);
+	offset += 64;
+	len = snprintf(buffer, sizeof(buffer), "Command_handle: %llu\n", (command_handle/collected_write_stats));
+	ret = kernel_write(kv_file, buffer, len, &offset);
+	offset += 64;
+	len = snprintf(buffer, sizeof(buffer), "Completion: %llu\n", (completition_time/collected_write_stats));
+	ret = kernel_write(kv_file, buffer, len, &offset);
+	offset += 64;
+	len = snprintf(buffer, sizeof(buffer), "Hole command: %llu\n", (hole_command/collected_write_stats));
+	ret = kernel_write(kv_file, buffer, len, &offset);
+	offset += 64;
+	len = snprintf(buffer, sizeof(buffer), "NUMBER OF WRITES: %u\n", (collected_write_stats));
+	ret = kernel_write(kv_file, buffer, len, &offset);
+	filp_close(kv_file, NULL);
+
+	dev_dbg(&epf->dev, "\t---- ACTUAL SIZE %zu ---- \n", actual_size);
+
 
 	if (!epf_nvme->ctrl_enabled)
 		return;
@@ -3584,13 +3709,6 @@ static int pci_epf_nvme_link_down(struct pci_epf *epf)
 {
 	struct pci_epf_nvme *epf_nvme = epf_get_drvdata(epf);
 
-	struct file *kv_file = NULL;
-	//file where the actual size will be saved
-	kv_file = filp_open(DISK_ACTUAL_SIZE_PATH, O_RDWR | O_CREAT, 0666);
-	kernel_write(kv_file, &actual_size, sizeof(actual_size), 0);
-	filp_close(kv_file, NULL);
-
-	dev_dbg(&epf->dev, "\t---- ACTUAL SIZE %zu ---- \n", actual_size);
 	dev_dbg(&epf->dev, "Link DOWN\n");
 
 	/* Stop polling BAR registers and disable the controller */
@@ -3713,6 +3831,12 @@ static int pci_epf_nvme_probe(struct pci_epf *epf,
 	epf->event_ops = &pci_epf_nvme_event_ops;
 	epf->header = &epf_nvme_pci_header;
 	epf_set_drvdata(epf, epf_nvme);
+	
+	read_stats = devm_kzalloc(&epf->dev, STATS_BUFFER_SIZE, GFP_KERNEL);
+	write_stats = devm_kzalloc(&epf->dev, STATS_BUFFER_SIZE, GFP_KERNEL);
+
+	if (!read_stats || !write_stats)
+		return -ENOMEM;
 
 	return 0;
 }
